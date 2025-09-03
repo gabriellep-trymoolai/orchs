@@ -1,0 +1,1 @@
+"""Configuration module for MoolAI Monitoring System."""

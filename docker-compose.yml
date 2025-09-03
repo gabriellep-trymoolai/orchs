@@ -1,0 +1,161 @@
+version: '3.8'
+
+networks:
+  moolai-internal:
+    driver: bridge
+    internal: false
+    attachable: false
+
+volumes:
+  postgres-orchestrator-data:
+    driver: local
+  redis-data:
+    driver: local
+  orchestrator-data:
+    driver: local
+  phoenix-data:
+    driver: local
+
+services:
+  # PostgreSQL Database for Organization (Orchestrator Data)
+  postgres-orchestrator:
+    image: postgres:15-alpine
+    container_name: postgres-orchestrator-${ORG_ID:-org_001}
+    restart: unless-stopped
+    networks:
+      - moolai-internal
+    environment:
+      POSTGRES_DB: orchestrator_${ORG_ID:-org_001}
+      POSTGRES_USER: orchestrator_user
+      POSTGRES_PASSWORD: ${ORCHESTRATOR_DB_PASSWORD}
+    volumes:
+      - postgres-orchestrator-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator_user -d orchestrator_${ORG_ID:-org_001}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "${ORCHESTRATOR_DB_PORT:-5434}:5432"  # Expose for debugging if needed
+
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: moolai-redis-${ORG_ID:-org_001}
+    restart: unless-stopped
+    networks:
+      - moolai-internal
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Phoenix AI Observability
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: moolai-phoenix-${ORG_ID:-org_001}
+    restart: unless-stopped
+    networks:
+      - moolai-internal
+    ports:
+      - "${PHOENIX_UI_PORT:-6006}:6006"      # UI and HTTP collector
+      - "${PHOENIX_GRPC_PORT:-4317}:4317"    # gRPC collector
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+      # Use PostgreSQL instead of SQLite - connect to orchestrator database
+      PHOENIX_SQL_DATABASE_URL: postgresql://orchestrator_user:${ORCHESTRATOR_DB_PASSWORD}@postgres-orchestrator:5432/orchestrator_${ORG_ID:-org_001}
+      PHOENIX_SQL_DATABASE_SCHEMA: phoenix
+    volumes:
+      - phoenix-data:/mnt/data
+    depends_on:
+      postgres-orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6006/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # React Frontend Development Service
+  frontend-dev:
+    build:
+      context: ./orchestrator/app/gui/frontend
+      dockerfile: Dockerfile.dev
+    container_name: moolai-frontend-dev-${ORG_ID:-org_001}
+    restart: unless-stopped
+    networks:
+      - moolai-internal
+    ports:
+      - "${FRONTEND_DEV_PORT:-3000}:3000"
+    environment:
+      - VITE_API_BASE_URL=http://20.125.25.170:${ORCHESTRATOR_PORT:-8000}
+      - VITE_WS_BASE_URL=ws://20.125.25.170:${ORCHESTRATOR_PORT:-8000}
+    volumes:
+      - ./orchestrator/app/gui/frontend/src:/app/src
+      - ./orchestrator/app/gui/frontend/public:/app/public
+    profiles:
+      - dev
+
+  # Orchestrator Service
+  moolai-orchestrator:
+    build: .
+    image: moolai/orchestrator:${VERSION:-latest}
+    container_name: orchestrator-${ORG_ID:-org_001}
+    restart: unless-stopped
+    depends_on:
+      postgres-orchestrator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - moolai-internal
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    environment:
+      # Service Identity
+      ORGANIZATION_ID: ${ORG_ID:-org_001}
+      ORCHESTRATOR_ID: ${ORCHESTRATOR_ID:-orchestrator_001}
+      ORCHESTRATOR_NAME: "Orchestrator ${ORG_ID:-org_001}"
+      
+      # Database URLs
+      DATABASE_URL: postgresql+asyncpg://orchestrator_user:${ORCHESTRATOR_DB_PASSWORD}@postgres-orchestrator:5432/orchestrator_${ORG_ID:-org_001}
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379/0
+      REDIS_LLM_CACHE_URL: redis://redis:6379/1
+      
+      # Controller Registration
+      CONTROLLER_URL: ${CONTROLLER_URL}
+      INTERNAL_URL: http://orchestrator-${ORG_ID:-org_001}:8000
+      IMAGE_NAME: moolai/orchestrator:${VERSION:-latest}
+      
+      # AI Service APIs
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      
+      # Authentication
+      JWT_SECRET: ${JWT_SECRET}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      MULTI_USER_MODE: ${MULTI_USER_MODE:-true}
+      
+      # Phoenix AI Observability Configuration
+      PHOENIX_HOST: http://phoenix:6006
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:4317
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - orchestrator-data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

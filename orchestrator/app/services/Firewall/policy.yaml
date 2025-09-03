@@ -1,0 +1,38 @@
+version: 1
+defaults:
+  llm_enabled: true
+
+  pii:
+    local_min_score: 0.60        # escalate if local max-score < 0.60
+    long_text_chars: 600         # escalate if no local hit and text is long
+    fuse: local_or_llm
+    llm_role: annotate_and_gate
+
+  secrets:
+    entropy_borderline: 3.9      # 32-hex ≈ 4.0 falls into [3.9, 4.15) => escalate
+    fuse: local_gates_llm_annotates
+    llm_role: annotate_only      # LLM adds labels, local still gates
+
+  toxicity:
+    long_text_chars: 300         # escalate on long text; always escalates if local flagged
+    fuse: local_or_llm
+    llm_role: severity_and_categories
+
+  allow:
+    org_requires_llm: true       # if local doesn't match, escalate to LLM
+    fuse: allow_if_any
+    llm_role: gate
+
+budget:
+  daily_llm_calls_cap: 5000      # token/rate safety rails
+  per_min_llm_calls_cap: 300
+
+circuit_breakers:
+  llm_error_rate_pct: 30
+  llm_latency_ms_p95: 4000
+
+overrides:
+  tenants: {}
+  emergency_override:
+    enabled: false
+    llm_enabled: false
